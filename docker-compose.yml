@@ -1,0 +1,21 @@
+services:
+  bankbot:
+    build: .
+    container_name: bankbot
+    env_file: .env
+
+    volumes:
+      - ./logs:/var/log
+
+    restart: unless-stopped
+
+    environment:
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN}
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "5"
