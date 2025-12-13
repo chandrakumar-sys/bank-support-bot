@@ -22,6 +22,32 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", 10))
 
 
+# -------------------------------------------------------
+# SAFE EMAIL BODY EXTRACTOR  (fixes your crash)
+# -------------------------------------------------------
+def extract_body(msg):
+    """Safely extract email body from single-part or multi-part emails."""
+    body = ""
+
+    if msg.is_multipart():
+        for part in msg.walk():
+            ctype = part.get_content_type()
+            disp = str(part.get("Content-Disposition"))
+
+            if ctype == "text/plain" and "attachment" not in disp:
+                try:
+                    body = part.get_payload(decode=True).decode(errors="ignore")
+                except:
+                    body = ""
+                return body
+        return "No message body."
+    else:
+        try:
+            return msg.get_payload(decode=True).decode(errors="ignore")
+        except:
+            return "No message body."
+
+
 def connect_imap():
     """Connect to Gmail IMAP"""
     mail = imaplib.IMAP4_SSL(IMAP_SERVER)
@@ -79,7 +105,9 @@ def main():
                 msg = email.message_from_bytes(data[0][1])
                 from_addr = email.utils.parseaddr(msg["From"])[1]
                 subject = msg["Subject"]
-                body = msg.get_payload(decode=True).decode(errors="ignore")
+                
+                # ✔✔ FIXED LINE:
+                body = extract_body(msg)
 
                 logging.info(f"Received email from {from_addr}: {subject}")
 
