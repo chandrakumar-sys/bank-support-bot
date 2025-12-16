@@ -5,13 +5,19 @@ import smtplib
 from email.mime.text import MIMEText
 from dotenv import load_dotenv
 import os
-from app.s3_loader import load_all_datasets
-from app.bedrock_gen import generate_reply
 import logging
+
+from app.s3_loader import load_all_datasets
+from app.bedrock_gen import generate_reply, detect_intents
+
+# GLPI handler functions (separate clean module)
+from app.glpi_handler import (
+    process_ticketing
+)
 
 load_dotenv()
 
-LOG_FILE = os.getenv("LOG_FILE", "/var/log/bankbot.log")
+LOG_FILE = os.getenv("LOG_FILE", "logs/bankbot.log")
 logging.basicConfig(filename=LOG_FILE, level=logging.INFO, format="%(asctime)s %(message)s")
 
 EMAIL_ACCOUNT = os.getenv("EMAIL_ACCOUNT")
@@ -23,23 +29,18 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", 10))
 
 
 # -------------------------------------------------------
-# SAFE EMAIL BODY EXTRACTOR  (fixes your crash)
+# SAFE EMAIL BODY EXTRACTOR 
+# (prevents crash when mail has no body)
 # -------------------------------------------------------
 def extract_body(msg):
     """Safely extract email body from single-part or multi-part emails."""
-    body = ""
-
     if msg.is_multipart():
         for part in msg.walk():
-            ctype = part.get_content_type()
-            disp = str(part.get("Content-Disposition"))
-
-            if ctype == "text/plain" and "attachment" not in disp:
+            if part.get_content_type() == "text/plain" and "attachment" not in str(part.get("Content-Disposition")):
                 try:
-                    body = part.get_payload(decode=True).decode(errors="ignore")
+                    return part.get_payload(decode=True).decode(errors="ignore")
                 except:
-                    body = ""
-                return body
+                    return "No message body."
         return "No message body."
     else:
         try:
@@ -48,23 +49,22 @@ def extract_body(msg):
             return "No message body."
 
 
+# -------------------------------------------------------
+# EMAIL / IMAP HELPERS
+# -------------------------------------------------------
 def connect_imap():
-    """Connect to Gmail IMAP"""
     mail = imaplib.IMAP4_SSL(IMAP_SERVER)
     mail.login(EMAIL_ACCOUNT, APP_PASSWORD)
     return mail
 
 
 def fetch_unread_emails(mail):
-    """Fetch unread emails"""
     mail.select("inbox")
     status, data = mail.search(None, "UNSEEN")
-    email_ids = data[0].split()
-    return email_ids
+    return data[0].split()
 
 
 def send_email(to_addr, body):
-    """Send email reply"""
     msg = MIMEText(body)
     msg["Subject"] = "Re: Your Query"
     msg["From"] = EMAIL_ACCOUNT
@@ -77,16 +77,18 @@ def send_email(to_addr, body):
     server.quit()
 
 
+# -------------------------------------------------------
+# MAIN LOOP
+# -------------------------------------------------------
 def main():
-    logging.info("Starting Banking AI Bot...")
-    print("Starting Banking AI Bot...")
+    logging.info("Starting Banking AI Bot…")
+    print("Starting Banking AI Bot…")
 
-    # Load datasets from S3
-    logging.info("Loading datasets from S3...")
+    logging.info("Loading datasets from S3…")
     customers, fees, loans = load_all_datasets()
     logging.info("Datasets loaded successfully.")
 
-    logging.info("Waiting for emails...")
+    logging.info("Waiting for emails…")
 
     while True:
         try:
@@ -103,20 +105,36 @@ def main():
                     continue
 
                 msg = email.message_from_bytes(data[0][1])
+
                 from_addr = email.utils.parseaddr(msg["From"])[1]
-                subject = msg["Subject"]
-                
-                # ✔✔ FIXED LINE:
+                subject = msg.get("Subject", "")
                 body = extract_body(msg)
 
-                logging.info(f"Received email from {from_addr}: {subject}")
+                logging.info(f"Received email from {from_addr}")
 
-                # Generate reply
-                reply = generate_reply(from_addr, body, customers, fees, loans)
+                # ------------------------------
+                # 1) Generate reply using Bedrock
+                # ------------------------------
+                ai_reply = generate_reply(from_addr, body, customers, fees, loans)
 
-                # Send reply
-                send_email(from_addr, reply)
-                logging.info(f"Sent reply to {from_addr}")
+                # Detect intents for ticket logic
+                intents = detect_intents(body)
+
+                # ------------------------------
+                # 2) Process ticketing (create / update / auto-close)
+                # ------------------------------
+                ticket_id, final_reply = process_ticketing(
+                    from_email=from_addr,
+                    user_message=body,
+                    ai_reply=ai_reply,
+                    intents=intents
+                )
+
+                # ------------------------------
+                # 3) Send email to customer
+                # ------------------------------
+                send_email(from_addr, final_reply)
+                logging.info(f"Sent reply to {from_addr} (ticket={ticket_id})")
 
             mail.logout()
 
